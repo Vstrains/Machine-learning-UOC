@@ -1,0 +1,345 @@
+---
+title: 'PEC1: Predicción de los splice junctions'
+author: "Virginio Cepas"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  pdf_document:
+    toc: yes
+    number_sections: yes
+    keep_tex: yes
+  word_document:
+    toc: yes
+params:
+  myfile: "splice.txt"
+  k_value: !r c(1, 5, 11, 21, 51, 71)
+---
+
+```{r setup, include=FALSE}
+# knitr options
+knitr::opts_chunk$set(fig.width = 6, fig.height = 6,echo = TRUE,
+                      message = FALSE, warning = FALSE)
+```
+
+```{r libraries, include=FALSE}
+if (!(require(stringr))) install.packages("stringr", dep=TRUE)
+if (!(require(dplyr))) install.packages("dplyr", dep=TRUE)
+if (!(require(gmodels))) install.packages("gmodels", dep=TRUE)
+if (!(require(class))) install.packages("class", dep=TRUE)
+if (!(require(pROC))) install.packages("pROC", dep=TRUE)
+if (!(require(ROCR))) install.packages("ROCR", dep=TRUE)
+if (!(require(caret))) install.packages("caret", dep=TRUE)
+if (!(require(knitr))) install.packages("knitr", dep=TRUE)
+if (!(require(ggseqlogo))) install.packages("ggseqlogo", dep=TRUE)
+```
+
+```{r input, include=FALSE}
+setwd("C:/Master/3 semestre/ML/PEC1/Entrega")
+splice <- read.table(params$myfile, header = FALSE, sep = ",")
+```
+
+# Algoritmo k-NN  
+
+El algoritmo k-NN (Nearest Neighbours algorithm) se basa en la clasificación de un 
+individuo tomando como referencia a sus __k__ vecino más cercanos. 
+En un primera fase, se entrena al algoritmo con un conjunto de datos de entrenamiento
+ya clasificados previamente. A continuación, se utiliza un set de datos no clasificados 
+para obtener una clasificacion según la similitud que tienen estos datos con sus vecinos. 
+Es decir, que se les asigna la clase mayoritaria de los __k__ vecinos más próximos. 
+En este algoritmo la elección de la __k__ es importante ya que puede variar en el resultado 
+dado que la distancia entre el dato a clasificar y sus __k__ vecinos juegan un papel 
+crucial en su clasificacion. 
+
+La siguiente tabla muestra las fortalezas y debilidades del algoritmo __k-NN__   
+
+|Fortalezas  |  Debilidades  |
+| ------    |  ------      |
+|· Simple y efectivo | · No produce un modelo, limitando la capacidad de entender cómo están relacionadas las características con la  clase|
+| · No hace suposiciones subyacentes sobre la distribución de los datos | · Requiere la selección de una _k_ apropiada
+|· Fase de entrenamiento rápida | · Fase de clasificación lenta |
+| |· Las características nominales y datos perdidos requieren de un procesamiento adicional |  
+
+# Funcion para implementar la codificación "One-hot" 
+```{r}
+# Creamos una función donde se aplicará a cada elemento de la lista (lapply) y 
+# substituiremos con gsub las letras del DNA por su codificacion en one-hot
+onehot_function<-function(x){
+  x <- lapply(x,as.character)
+  x <- gsub("A", "10000000", x)
+  x <- gsub("G", "01000000", x)
+  x <- gsub("T", "00100000", x)
+  x <- gsub("C", "00010000", x)
+  x <- gsub("D", "00001000", x)
+  x <- gsub("N", "00000100", x)
+  x <- gsub("S", "00000010", x)
+  x <- gsub("R", "00000001", x)
+  dna <- lapply(strsplit(x, ""), as.numeric)# separamos los caracteres con ""
+  # se pasa la lista a vectores para formar una matriz que se rellena de fila en fila
+  dna <- matrix(unlist(dna), nrow = filas , byrow = TRUE)
+  return(dna) 
+}
+```
+Para mostrar la función, se utiliza la secuencia del enunciado ya que la podemos 
+utilizar como referencia para comprobar que ha funcionado correctamente. 
+
+```{r}
+ejemplo <- as.data.frame("CCAGCTGCATCACAGGAGGCCAGCGAGCAGGTCTGTTCCAAGGGCCTTCGAGCCAGTCTG")
+filas <- nrow(ejemplo) # Indicamos el parametro fila que se utiliza en la funcion.
+onehot_function(ejemplo)[1:100]
+```
+Se observa que coinciden las primeras 100 entradas con las del enunciado. 
+
+# Desarrollar un script en R que implemente un clasificador k-NN
+## Leer los datos del fichero splice.txt y hacer una breve descripción de ellos
+
+```{r}
+splice <- read.table("splice.txt", header = FALSE, sep = ",")
+names(splice) = c("class", "seq_name", "secuencia")
+# Quitamos los espacios en blanco en el df
+splice <- splice %>% 
+  mutate(across(where(is.character), str_trim))
+str(splice)
+table(splice[,1])
+```
+La tabala contiene 3 columnas con las clases, el nombre y la secuencia. 
+También se muestra el total de clases dentro de la tabla.
+
+## Transformación de las secuencias de nucleótidos en vectores numéricos
+
+Para realizar esta transformación, utilizaremos la funcion creada anteriormente
+```{r}
+filas <- nrow(splice)
+onehot_dna <- onehot_function(splice[, 3])
+#Se crea la tabla que contiene la nueva columna 
+splice_oh <- splice %>% 
+  select (-c("secuencia"))
+splice_oh <- cbind(splice_oh,onehot_dna)
+head(splice_oh)[1:20]
+```
+Se observa que la función se ha aplicado correctamente y ha transformado la 
+secuencia en el formato "One-hot".
+
+## Implementación del algoritmo k-NN
+### Preparación de los datos
+
+```{r}
+#Se divide el df segun si son acceptors o donors junto con las secuencias sin splicing.
+acceptors_n_df <- filter(splice_oh, class == "IE"  | class == "N")
+donors_n_df <- filter(splice_oh, class == "EI"  | class == "N")
+
+#Se crean los dos grupos al azar sin reemplazo
+set.seed(123) #fijar la semilla para el generador pseudoaleatorio
+acceptors_n <- sample(1:nrow(acceptors_n_df),round(0.67 * nrow(acceptors_n_df))
+                      , replace = F)
+set.seed(123)
+donors_n <- sample(1:nrow(donors_n_df),round(0.67 * nrow(donors_n_df))
+                   , replace = F)
+
+#Creación de los datos de entrenamiento y test
+training_acceptors_n <-acceptors_n_df[3:480][acceptors_n,]
+test_acceptor_n <-acceptors_n_df[3:480][-acceptors_n,]
+training_donors_n <-donors_n_df[3:480][donors_n,]
+test_donors_n <-donors_n_df[3:480][-donors_n,]
+
+#Creación de las etiquetas para cada grupo y transformación a factor para poder
+#utilizarlos en confusionMatrix()
+training_label_acceptors_n <- as.factor(acceptors_n_df[acceptors_n,1])
+test_label_acceptors_n <- as.factor(acceptors_n_df[-acceptors_n,1])
+training_label_donors_n <- as.factor(donors_n_df[donors_n,1])
+test_label_donors_n <- as.factor(donors_n_df[-donors_n,1])
+
+head(training_acceptors_n)[1:28] # Representación de la muestra
+```
+### Aplicar el k-NN, realizar curva ROC para cada K y mostrar el valor AUC   
+   
+
+__Acceptors__ 
+
+Para hacer el informe más dinamico, creamos un bucle donde se calculará el algoritmo 
+__k-NN__ para cada una de las __k__'s.  
+Para calcular la probabilidad de la clase positiva, las que representan secuencias 
+con puntos de _splicing_ (IE,EI), se extrae de la funcion _knn()_ asignando a la 
+probabilidad el valor TRUE para posteriormente restarle 1 y obtenir así 
+la probabilidad de ser clase ganadora.
+Una vez calculada la probabilidad de ser clase ganadora se representa la curva ROC 
+con su valor AUC.
+
+```{r fig.height=4, fig.width=3.5}
+k <- params$k_value # Indicamos los valores de k
+res_auc_acc <- c()# Creamos este vector para utilizarlo más tarde en una tabla resumen
+for (i in k){
+  test_pred_acc <- knn(train = training_acceptors_n, test = test_acceptor_n
+                       , cl = training_label_acceptors_n, k = i, prob = TRUE)
+  # Obtenemos la probabilidad ganadora utilizando el comando attr para poder 
+  # extraerlo del objeto
+  prob <- attr(test_pred_acc, "prob")
+  # Calculamos la posibilidad de ser clase ganadora para aquellos que sean N
+  prob_all <- ifelse(test_pred_acc == "IE", prob, 1-prob)
+  pred_knn <- prediction(predictions = prob_all, labels = test_label_acceptors_n
+             # Ordenamos de menor a mayor para obtener el gráfico de lo contrario, 
+             # el eje de las x se invierte
+                        ,label.ordering = c("N","IE")) 
+  # Cálculo true y false prediction rates para la curva ROC
+  perf_tf <- performance(pred_knn, "tpr", "fpr")
+  perf_auc <- performance(pred_knn, "auc")# Cálculo AUC
+  # Extracción de AUC utilizando el @ ya que se trata de un objeto S4
+  perf_auc <- unlist(perf_auc@y.values)
+  res_auc_acc <- c(res_auc_acc,perf_auc)# Guardamos los AUC
+  res_auc_acc <- round(res_auc_acc,4)
+  # El formato sale de https://ipa-tys.github.io/ROCR/articles/ROCR.html
+  plot(perf_tf, avg = "threshold", colorize = T, lwd = 3 
+       , main = paste("ROC, k: ", i, ", AUC = ", round(perf_auc,4)))
+  abline(a = 0, b = 1, lwd = 1, lty = 1)
+}
+```
+
+__Donors__      
+
+Para los donors, aplicamos el mismo código que el apartado anterior. 
+
+```{r fig.height=4, fig.width=3.5}
+res_auc_don <- c()# Creamos este vector para utilizarlo más tarde en una tabla resumen
+for (i in k){
+  test_pred_don <- knn(train = training_donors_n, test = test_donors_n
+                       , cl = training_label_donors_n, k=i, prob= TRUE)
+  # Obtenemos la probabilidad ganadora utilizando el comando attr para poder 
+  # extraerlo del objeto
+  prob <- attr(test_pred_don, "prob")
+  # Calculamos la posibilidad de ser clase ganadora para aquellos que sean N
+  prob_all <- ifelse(test_pred_don == "EI", prob, 1-prob)
+  pred_knn <- prediction(predictions = prob_all, labels = test_label_donors_n
+            # Ordenamos de menos a mayor para obtener el gráfico de lo contrario, 
+            # el eje de las x se invierte
+                         ,label.ordering = c("N","EI"))
+  # Cálculo true y false prediction rates para la curva ROC
+  perf_tf <- performance(pred_knn, "tpr", "fpr")
+  perf_auc <- performance(pred_knn, "auc")# Cálculo AUC
+  # Extracción de AUC utilizando el @ ya que se trata de un objeto S4
+  perf_auc <- unlist(perf_auc@y.values)
+  res_auc_don <- c(res_auc_don,perf_auc)# Guardamos los AUC
+  res_auc_don <- round(res_auc_don,4)
+  #El formato sale de https://ipa-tys.github.io/ROCR/articles/ROCR.html
+  plot(perf_tf, avg = "threshold", colorize = T, lwd = 3
+       , main = paste("ROC, k: ", i, ", AUC = ", round(perf_auc,4)))
+  abline(a = 0, b = 1, lwd = 1, lty = 1)
+}
+```
+
+### Comentar los resultados de la clasificación   
+__Acceptors__   
+
+Para obtener los falsos positivos, falsos negativos y error de clasificación 
+obtenidos para los diferentes valores de __k__ se pueden hacer de diferentes formas. 
+Uno de ellos sería hacer una _CrossTable_ y mediante la formula (TP + TN) / (TP + TN + FP + FN)
+obtener la _accuracy_ y restarle a 1 este valor para obtener el error de clasificación. 
+La otra alternativa a realizar los cálculos de forma individual es crear una 
+_ConfussionMatrix_ y extraer los da tos de ahí. 
+
+```{r}
+resum_acc <- data.frame(k, FP=NA, FN=NA, mal_clas=NA)
+j <- 0
+set.seed(123)
+for (i in k) {
+  j <- j +1
+  test_pred_acc <- knn(train =training_acceptors_n, test = test_acceptor_n
+                       , cl = training_label_acceptors_n, k=i, prob= T)
+  cfM <-confusionMatrix(test_pred_acc,test_label_acceptors_n, positive = "IE")
+  err_rate_acc <- (1-cfM$overall["Accuracy"])*100#calculo del error
+  # Se extrae de la matriz de confusion los FP y los FN. Debemos tener en cuenta que 
+  # en esta tabla los valores se transponen
+  resum_acc[j,2:4] <- c(cfM$table[2,1], cfM$table[1,2], (err_rate_acc))
+}
+tabla_acc <- cbind(resum_acc, res_auc_acc)
+```
+La siguiente tabla muestra los datos que pide el enunciado para las secuencias acceptors.
+```{r echo=FALSE}
+knitr:: kable(tabla_acc, booktabs = TRUE, align = c("c","c","c","c","c"),
+              col.names = c("K", "Falso positivo", "Falso negativo"
+                            , "Error de clasificación (%)", "AUC" ),
+              caption = "Acceptors")
+```
+
+En este modelo, a medida que aumenta la __k__, tanto los falsos positivos y 
+falsos negativos disminuyen. No obstante, se observa que en la __k__ = 21 la precisión 
+del modelo es mayor ya que contiene unicamente 1 falso negativo en su predicción. 
+En cuanto al % de mal clasificados se observa que al aumentar la __k__ el número de 
+falsos negativos decrece y por lo tanto es de esperar que el % en error de clasificación
+también se vea reducido (hasta casi un 6%). El modelo mejora substancialmente en cuanto al error de clasificación 
+si comparamos la __k__ = 1 y la __k__ = 11. 
+En cuanto al valor de AUC se observa que con la __k__ = 11 hasta __k__ = 71 la curva ROC 
+tiene una pendiente más elevada y su AUC bajo la curva ROC es del 99% demostrando su alto 
+poder de predicción con  una precisión elevada.
+
+Finalmente, el modelo para la detección de regiones de _splicing_, en el limite 
+de intrones-exones o _acceptors_, funciona mejor a medida que aumenta la __k__. No obstante hay que
+evitar modelos con _overfiting_ seleccionando __k__'s muy elevadas. En este caso en concreto, 
+quizás la __k__=21 sería una buena opción para implementar.
+
+__Donors__
+
+Para los _donors_ implementamos el mismo código que en el apartado anterior
+
+```{r}
+resum_don <- data.frame(k, FP=NA, FN=NA, mal_clas=NA)
+j <- 0
+set.seed(123)
+for (i in k) {
+  j <- j +1
+  test_pred_don <- knn(train = training_donors_n, test = test_donors_n
+                       , cl = training_label_donors_n, k=i, prob= TRUE)
+  cfM <-confusionMatrix(test_pred_don,test_label_donors_n, positive = "EI")
+  err_rate_don <- (1-cfM$overall["Accuracy"])*100#calculo del error
+  # Se extrae de la matriz de confusion los FP y los FN. Debemos tener en cuenta que 
+  # en esta tabla los valores se transponen
+  resum_don[j,2:4] <- c(cfM$table[2,1], cfM$table[1,2], (round(err_rate_don,3)))
+}
+tabla_don <- cbind(resum_don, res_auc_don)
+
+```
+
+La siguiente tabla muestra los datos que pide el enunciado para las secuencias donors.
+```{r echo=FALSE}
+knitr:: kable(tabla_don, booktabs = TRUE, align = c("c","c","c","c", "c"),
+              col.names = c("K", "Falso positivo", "Falso negativo", "Error de clasificación (%)", "AUC" ),
+              caption = "Donors")
+```
+
+Igual que pasaba anteriormente, a medida que aumenta la __k__ tanto los falsos positivos 
+como los falsos negativos disminuyen. La sensibilidad de este modelo varia del 99,4 
+para __k__=11 a 99,7 para __k__=21, la diferencia es pequeña. También se observa que hay un cambio substantial 
+en el error de clasificación si comparamos __k__=1 y __k__= 21 donde disminuye hasta un 11,5%.
+En cuanto al AUC observamos que la diferencia de __k__=21 hasta __k__ = 71 es de 0.0005. En este 
+caso para seleccionar una __k__ adecuada para el modelo y predecir los lugares de _splicing_ para 
+los _donors_, elegiria __k__=21 ya que la diferencia en la sensibilidad y AUC con __k__'s mayores es 
+pequeña y así evitariamos problemas de _overfiting_.
+
+# Secuencias logo    
+
+Para poder presentar la secuencia logo se crea previamente una variable con las 
+letras que queremos que contenga. Debemos de crearla porque el que viene por defecto (DNA)
+no incluye los carácteres D, N, S y R. Si no los incluimos, las secuencias logo 
+no se generan correctamente.
+
+```{r echo=TRUE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+# Creación del abecedario
+alphabet <- c("A", "G", "T", "C", "D", "N", "S", "R")
+tipos <- c("N","IE", "EI") 
+for (j in tipos) {
+  plot(ggseqlogo(splice[splice$class==j,3], seq_type='other', namespace = alphabet))
+}
+```
+
+La primera secuencia logo corresponde a las secuencias que no incluyen un sitio de _splicing_. 
+Se observa que no predomina ningún nucleotido por encima de otro ya que se pueden encontrar 
+de forma homogenea los 4 nucleótidos en toda la secuencia. 
+
+Para el segundo gráfico, las IE o límites intron/exon, en las posiciones 29-30 se observa claramente 
+como dominan los nucleótidos A y G. Seguramente este patrón de nucleótidos sea una señal 
+celular por donde realizar el _splicing_ cuando se sintetizan las proteinas. 
+
+El último gráfico, EI o límites exón/intrón, en las posiciones 31-32 predominan los 
+nucleótidos G y T. Igual que en el caso anterior, seguramente se
+trate de un patrón genético que la máquinaria celular reconozca como un lugar de _splicing_.
+
+Finalmente se puede concluir que los carácteres D, N, S y R son minoritarios en la 
+secuencia ya que no hay representación en ninguna de las secuencias logo.
+
